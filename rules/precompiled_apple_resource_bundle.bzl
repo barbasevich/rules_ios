@@ -51,6 +51,23 @@ def _precompiled_apple_resource_bundle_impl(ctx):
         fake_ctx_dict[k] = getattr(ctx, k)
     fake_ctx_dict["attr"] = struct(**attr_dict)
     fake_ctx_dict["file"] = struct(**file_dict)
+
+    # The label of this fake_ctx is used as the swift module associated with storyboards, nibs, xibs
+    # and CoreData models.
+    # * For storyboards, nibs and xibs: https://github.com/bazelbuild/rules_apple/blob/master/apple/internal/partials/support/resources_support.bzl#L446
+    # * For CoreData models: https://github.com/bazelbuild/rules_apple/blob/master/apple/internal/partials/support/resources_support.bzl#L57
+    #
+    # Such swift module is required in the following cases:
+    # 1- When the storyboard, nib or xib contains the value <customModuleProvider="target">.
+    # 2- When the CoreData model sets "Current Product Module" for its Module property.
+    # If none of above scenarios, the swift module is not important and could be any arbitrary string.
+    # For the full context see https://github.com/bazel-ios/rules_ios/issues/113
+    #
+    # Usage:
+    # The most common scenario happens when the bundle name is the same as the corresponding swift module.
+    # If that is not the case, it is possible to customize the swift module by explicitly
+    # passing a swift_module attr
+    fake_ctx_dict["label"] = Label("//fake_package:" + (ctx.attr.swift_module or bundle_name))
     fake_ctx = struct(**fake_ctx_dict)
 
     partial_output = partial.call(partials.resources_partial(
@@ -187,6 +204,10 @@ precompiled_apple_resource_bundle = rule(
             mandatory = False,
             doc = "The bundle identifier of the resource bundle.",
         ),
+        swift_module = attr.string(
+            mandatory = False,
+            doc = "The swift module to use when compiling storyboards, nibs and xibs that contain a customModuleProvider",
+        ),
         resources = attr.label_list(
             allow_empty = True,
             allow_files = True,
@@ -227,8 +248,8 @@ the bundle as a dependency.""",
             ),
             doc = "The xcode config that is used to determine the deployment target for the current platform.",
         ),
-        _whitelist_function_transition = attr.label(
-            default = "@build_bazel_rules_apple//tools/whitelists/function_transition_whitelist",
+        _allowlist_function_transition = attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
             doc = "Needed to allow this rule to have an incoming edge configuration transition.",
         ),
     ),

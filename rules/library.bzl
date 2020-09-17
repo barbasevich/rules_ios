@@ -468,12 +468,13 @@ def apple_library(name, library_tools = {}, export_private_headers = True, names
     objc_copts += [
         "-fmodules",
         "-fmodule-name=%s" % module_name,
-        "-gmodules",
     ]
 
     swift_copts += [
         "-Xcc",
         "-D__SWIFTC__",
+        "-Xfrontend",
+        "-no-clang-module-breadcrumbs",
     ]
 
     swift_version = _canonicalize_swift_version(kwargs.pop("swift_version", None))
@@ -483,6 +484,8 @@ def apple_library(name, library_tools = {}, export_private_headers = True, names
     objc_libname = "%s_objc" % name
     swift_libname = "%s_swift" % name
     cpp_libname = "%s_cpp" % name
+
+    module_data = library_tools["wrap_resources_in_filegroup"](name = module_name + "_data", srcs = data)
 
     if swift_sources:
         swift_copts.extend(("-Xcc", "-I."))
@@ -506,6 +509,7 @@ def apple_library(name, library_tools = {}, export_private_headers = True, names
             deps = deps + internal_deps + lib_names,
             swiftc_inputs = swiftc_inputs,
             features = ["swift.no_generated_module_map"],
+            data = [module_data],
             tags = tags_manual,
             **kwargs
         )
@@ -558,10 +562,12 @@ def apple_library(name, library_tools = {}, export_private_headers = True, names
         )
         lib_names.append(cpp_libname)
 
-    objc_library_data = library_tools["wrap_resources_in_filegroup"](name = objc_libname + "_data", srcs = data)
     objc_copts.append("-I.")
 
-    objc_copts.extend(("-index-store-path", "$(GENDIR)/rules_ios_apple_library_objc.indexstore"))
+    objc_copts.extend(("-index-store-path", "$(GENDIR)/{package}/rules_ios_objc_library_{libname}.indexstore".format(
+        package = native.package_name(),
+        libname = objc_libname,
+    )))
     objc_library(
         name = objc_libname,
         srcs = objc_sources + objc_private_hdrs + objc_non_exported_hdrs,
@@ -575,14 +581,14 @@ def apple_library(name, library_tools = {}, export_private_headers = True, names
         weak_sdk_frameworks = weak_sdk_frameworks,
         sdk_includes = sdk_includes,
         pch = pch,
-        data = [objc_library_data],
+        data = [] if swift_sources else [module_data],
         tags = tags_manual,
         **kwargs
     )
     launch_screen_storyboard_name = name + "_launch_screen_storyboard"
     native.filegroup(
         name = launch_screen_storyboard_name,
-        srcs = [objc_library_data],
+        srcs = [module_data],
         output_group = "launch_screen_storyboard",
         tags = _MANUAL,
     )
@@ -602,4 +608,5 @@ def apple_library(name, library_tools = {}, export_private_headers = True, names
         namespace = namespace,
         linkopts = linkopts,
         platforms = platforms,
+        has_swift_sources = (swift_sources and len(swift_sources) > 0),
     )
