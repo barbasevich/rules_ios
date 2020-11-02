@@ -2,7 +2,6 @@ load("@build_bazel_rules_apple//apple:providers.bzl", "AppleBundleInfo")
 load("@build_bazel_rules_swift//swift:swift.bzl", "SwiftInfo")
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("//rules:hmap.bzl", "HeaderMapInfo")
-load("//rules:transition_support.bzl", "transition_support")
 
 def _get_attr_values_for_name(deps, provider, field):
     return [
@@ -100,6 +99,12 @@ def _xcodeproj_aspect_impl(target, ctx):
     bazel_bin_subdir = "%s/%s" % (target.label.workspace_root, target.label.package)
 
     if AppleBundleInfo in target:
+        swift_objc_header_path = None
+        if SwiftInfo in target:
+            for h in target[apple_common.Objc].direct_headers:
+                if h.path.endswith("-Swift.h"):
+                    swift_objc_header_path = h.path
+
         bundle_info = target[AppleBundleInfo]
         test_host_appname = None
         test_host_target = None
@@ -116,6 +121,7 @@ def _xcodeproj_aspect_impl(target, ctx):
             if test_host_target:
                 test_host_appname = test_host_target[_TargetInfo].direct_targets[0].name
 
+        framework_includes = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "framework_includes"))
         info = struct(
             name = bundle_info.bundle_name,
             bundle_id = bundle_info.bundle_id,
@@ -125,7 +131,7 @@ def _xcodeproj_aspect_impl(target, ctx):
             srcs = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "srcs")),
             non_arc_srcs = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "non_arc_srcs")),
             asset_srcs = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "asset_srcs")),
-            framework_includes = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "framework_includes")),
+            framework_includes = framework_includes,
             cc_defines = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "cc_defines")),
             swift_defines = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "swift_defines")),
             build_files = depset(_srcs_info_build_files(ctx), transitive = _get_attr_values_for_name(deps, _SrcsInfo, "build_files")),
@@ -134,6 +140,8 @@ def _xcodeproj_aspect_impl(target, ctx):
             minimum_os_version = bundle_info.minimum_os_version,
             test_host_appname = test_host_appname,
             env_vars = env_vars,
+            swift_objc_header_path = swift_objc_header_path,
+            swift_module_paths = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "swift_module_paths")),
             hmap_paths = depset([], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "hmap_paths")),
             commandline_args = commandline_args,
         )
@@ -148,7 +156,8 @@ def _xcodeproj_aspect_impl(target, ctx):
                     swift_defines = info.swift_defines,
                     build_files = depset(_srcs_info_build_files(ctx)),
                     direct_srcs = [],
-                    hmap_paths = depset(hmap_paths),
+                    hmap_paths = info.hmap_paths,
+                    swift_module_paths = info.swift_module_paths,
                 ),
             )
 
@@ -187,9 +196,11 @@ def _xcodeproj_aspect_impl(target, ctx):
             framework_includes.append(target[CcInfo].compilation_context.framework_includes)
             cc_defines.append(target[CcInfo].compilation_context.defines)
 
+        swift_module_paths = []
         if SwiftInfo in target:
             swift_defines.append(depset(target[SwiftInfo].direct_defines))
             swift_defines.append(target[SwiftInfo].transitive_defines)
+            swift_module_paths = [m.path for m in target[SwiftInfo].direct_swiftmodules]
         providers.append(
             _SrcsInfo(
                 srcs = depset(srcs, transitive = _get_attr_values_for_name(deps, _SrcsInfo, "srcs")),
@@ -201,6 +212,7 @@ def _xcodeproj_aspect_impl(target, ctx):
                 swift_defines = depset([], transitive = swift_defines),
                 direct_srcs = srcs,
                 hmap_paths = depset(hmap_paths),
+                swift_module_paths = depset(swift_module_paths, transitive = _get_attr_values_for_name(deps, _SrcsInfo, "swift_module_paths")),
             ),
         )
 
@@ -252,17 +264,66 @@ def _exclude_swift_incompatible_define(define):
         return token
     return None
 
-def _joined_header_search_paths(hmap_paths):
+def _framework_search_paths_for_target(target_name, all_transitive_targets):
+    # Ensure Xcode will resolve references to the XCTest framework.
+    framework_search_paths = ["$(PLATFORM_DIR)/Developer/Library/Frameworks"]
+
+    # all_transitive_targets includes all the targets built with their different configurations.
+    # Some configurations are only applied when the target is reached transitively
+    # (e.g. via an app or test that applies and propagates new build settings).
+    for at in all_transitive_targets:
+        if at.name == target_name:
+            for fi in at.framework_includes.to_list():
+                if fi[0] != "/":
+                    fi = "$BAZEL_WORKSPACE_ROOT/%s" % fi
+                framework_search_paths.append("\"%s\"" % fi)
+    return " ".join(framework_search_paths)
+
+def _swiftmodulepaths_for_target(target_name, all_transitive_targets):
+    """Helper method to aggregate all swiftmodules paths that could be generated by this target
+
+    Args:
+        target_name: The name of the target whose header search paths we want to aggregate
+        all_transitive_targets: all targets that have been traversed by the aspect
+
+    Returns:
+        One string joined by space with all swiftmodule paths, each path is quoted and separated by a space
+    """
+    swiftmodulefiles = []
+
+    # all_transitive_targets includes all the targets built with their different configurations.
+    # Some configurations are only applied when the target is reached transitively
+    # (e.g. via an app or test that applies and propagates new build settings).
+    for at in all_transitive_targets:
+        if at.name == target_name:
+            for modulefilename in at.swift_module_paths.to_list():
+                if modulefilename not in swiftmodulefiles:
+                    swiftmodulefiles.append(modulefilename)
+                    swiftmodulefiles.append(modulefilename.replace(".swiftmodule", ".swiftdoc"))
+                    swiftmodulefiles.append(modulefilename.replace(".swiftmodule", ".swiftsourceinfo"))
+
+    return " ".join(swiftmodulefiles)
+
+def _header_search_paths_for_target(target_name, all_transitive_targets):
     """Helper method transforming valid hmap paths into full absolute paths and concat together
 
     Args:
-        hmap_paths: array of string and each is a path to hmap we have collected
+        target_name: The name of the target whose header search paths we want to aggregate
+        all_transitive_targets: all targets that have been traversed by the aspect
 
     Returns:
         One string joined by absolute hmap paths, each path is quoted and separated by a space
     """
     header_search_paths = []
-    for hmap in hmap_paths:
+    all_hmaps = []
+
+    # all_transitive_targets includes all the targets built with their different configurations.
+    # Some configurations are only applied when the target is reached transitively
+    # (e.g. via an app or test that applies and propagates new build settings).
+    for at in all_transitive_targets:
+        if at.name == target_name:
+            all_hmaps.extend(at.hmap_paths.to_list())
+    for hmap in all_hmaps:
         if len(hmap) == 0:
             continue
         if hmap != "." and hmap[0] != "/":
@@ -326,7 +387,6 @@ def _gather_asset_sources(target_info, path_prefix):
 
     for s in target_info.asset_srcs.to_list():
         short_path = s.short_path
-        group = paths.dirname(short_path)
         (extension, path_so_far) = _classify_asset(short_path)
 
         # Reference for logics below:
@@ -334,7 +394,6 @@ def _gather_asset_sources(target_info, path_prefix):
         if extension == None:
             payload = {
                 "path": paths.join(path_prefix, short_path),
-                "group": group,
                 "optional": True,
                 "buildPhase": "none",
             }
@@ -359,7 +418,6 @@ def _gather_asset_sources(target_info, path_prefix):
     for datamodel_key in datamodel_groups.keys():
         payload = {
             "path": paths.join(path_prefix, datamodel_key),
-            "group": paths.dirname(datamodel_key),
             "optional": True,
             "buildPhase": "none",
         }
@@ -368,7 +426,6 @@ def _gather_asset_sources(target_info, path_prefix):
     for asset_key in catalog_groups.keys():
         payload = {
             "path": paths.join(path_prefix, asset_key),
-            "group": paths.dirname(asset_key),
             "optional": True,
             "buildPhase": "none",
         }
@@ -377,99 +434,61 @@ def _gather_asset_sources(target_info, path_prefix):
     # Append BUILD.bazel files to project
     asset_sources += [{
         "path": paths.join(path_prefix, p),
-        "group": paths.dirname(p),
         "optional": True,
         "buildPhase": "none",
         # TODO: add source language type once https://github.com/yonaskolb/XcodeGen/issues/850 is resolved
     } for p in target_info.build_files.to_list()]
     return asset_sources
 
-def _xcodeproj_impl(ctx):
-    xcodegen_jsonfile = ctx.actions.declare_file(
-        "%s-xcodegen.json" % ctx.attr.name,
-    )
-    project_name = (ctx.attr.project_name or ctx.attr.name) + ".xcodeproj"
-    if "/" in project_name:
-        fail("No / allowed in project_name")
-
-    project = ctx.actions.declare_directory(project_name)
-    nesting = ctx.label.package.count("/") + 1 if ctx.label.package else 0
-    src_dot_dots = "/".join([".." for x in range(nesting + 3)])
-    script_dot_dots = "/".join([".." for x in range(nesting)])
-
-    proj_options = {
-        "createIntermediateGroups": True,
-        "defaultConfig": "Debug",
-        "groupSortPosition": "none",
-        "settingPresets": "none",
-    }
-    proj_settings_base = {
-        "BAZEL_BUILD_EXEC": "$BAZEL_STUBS_DIR/build-wrapper",
-        "BAZEL_OUTPUT_PROCESSOR": "$BAZEL_STUBS_DIR/output-processor.rb",
-        "BAZEL_PATH": ctx.attr.bazel_path,
-        "BAZEL_RULES_IOS_OPTIONS": "--@build_bazel_rules_ios//rules:local_debug_options_enabled",
-        "BAZEL_WORKSPACE_ROOT": "$SRCROOT/%s" % script_dot_dots,
-        "BAZEL_STUBS_DIR": "$PROJECT_FILE_PATH/bazelstubs",
-        "BAZEL_INSTALLERS_DIR": "$PROJECT_FILE_PATH/bazelinstallers",
-        "BAZEL_INSTALLER": "$BAZEL_INSTALLERS_DIR/%s" % ctx.executable.installer.basename,
-        "BAZEL_EXECUTION_LOG_ENABLED": False,
-        "CC": "$BAZEL_STUBS_DIR/clang-stub",
-        "CXX": "$CC",
-        "CLANG_ANALYZER_EXEC": "$CC",
-        "CODE_SIGNING_ALLOWED": False,
-        "DEBUG_INFORMATION_FORMAT": "dwarf",
-        "DONT_RUN_SWIFT_STDLIB_TOOL": True,
-        "LD": "$BAZEL_STUBS_DIR/ld-stub",
-        "LIBTOOL": "/usr/bin/true",
-        "SWIFT_EXEC": "$BAZEL_STUBS_DIR/swiftc-stub",
-        "SWIFT_OBJC_INTERFACE_HEADER_NAME": "",
-        "SWIFT_VERSION": 5,
-    }
-    proj_settings_debug = {
-        "GCC_PREPROCESSOR_DEFINITIONS": "DEBUG",
-        "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
-    }
-    proj_settings = {
-        "base": proj_settings_base,
-        "configs": {
-            "Debug": proj_settings_debug,
-        },
-    }
-
-    targets = []
-    all_transitive_targets = depset(transitive = _get_attr_values_for_name(ctx.attr.deps, _TargetInfo, "targets")).to_list()
-    if ctx.attr.include_transitive_targets:
-        targets = all_transitive_targets
-    else:
-        targets = []
-        for t in _get_attr_values_for_name(ctx.attr.deps, _TargetInfo, "direct_targets"):
-            targets.extend(t)
-
-    xcodeproj_targets_by_name = {}
-    xcodeproj_schemes_by_name = {}
-
-    for target_info in targets:
-        target_name = target_info.name
-
-        if target_name in xcodeproj_targets_by_name:
-            existing_type = xcodeproj_targets_by_name[target_name]["type"]
-            if target_info.product_type != existing_type:
-                fail("""\
+_CONFLICTING_TARGET_MSG = """\
 Failed to generate xcodeproj for "{}" due to conflicting targets:
 Target "{}" is already defined with type "{}".
 A same-name target with label "{}" of type "{}" wants to override.
 Double check your rule declaration for naming or add `xcodeproj-ignore-as-target` as a tag to choose which target to ignore.
-""".format(ctx.label, target_name, existing_type, target_info.bazel_build_target_name, target_info.product_type))
+"""
+_BUILD_WITH_BAZEL_SCRIPT = """
+set -euxo pipefail
+cd $BAZEL_WORKSPACE_ROOT
 
-        target_macho_type = "staticlib" if target_info.product_type == "framework" else "$(inherited)"
+export BAZEL_DIAGNOSTICS_DIR="$BUILD_DIR/../../bazel-xcode-diagnostics/"
+mkdir -p $BAZEL_DIAGNOSTICS_DIR
+export DATE_SUFFIX="$(date +%Y%m%d.%H%M%S%L)"
+export BAZEL_BUILD_EVENT_TEXT_FILENAME="$BAZEL_DIAGNOSTICS_DIR/build-event-$DATE_SUFFIX.txt"
+export BAZEL_BUILD_EXECUTION_LOG_FILENAME="$BAZEL_DIAGNOSTICS_DIR/build-execution-log-$DATE_SUFFIX.log"
+env -u RUBYOPT -u RUBY_HOME -u GEM_HOME $BAZEL_BUILD_EXEC {bazel_build_target_name}
+$BAZEL_INSTALLER
+"""
+
+def _populate_xcodeproj_targets_and_schemes(ctx, targets, src_dot_dots, all_transitive_targets):
+    """Helper method to generate dicts for targets and schemes inside Xcode context
+
+    Args:
+        ctx: context provided to rule impl
+        targets: each dict contains info of a bazel target (not xcode target)
+        src_dot_dots: caller needs to figure out how many `../` needed to correctly points to an actual file
+
+    Returns:
+        A tuple where first argument a dict representing xcode targets.
+        Second argument represents xcode schemes
+    """
+    xcodeproj_targets_by_name = {}
+    xcodeproj_schemes_by_name = {}
+    for target_info in targets:
+        target_name = target_info.name
+        product_type = target_info.product_type
+
+        if target_name in xcodeproj_targets_by_name:
+            existing_type = xcodeproj_targets_by_name[target_name]["type"]
+            if product_type != existing_type:
+                fail(_CONFLICTING_TARGET_MSG.format(ctx.label, target_name, existing_type, target_info.bazel_build_target_name, target_info.product_type))
+
+        target_macho_type = "staticlib" if product_type == "framework" else "$(inherited)"
         compiled_sources = [{
             "path": paths.join(src_dot_dots, s.short_path),
-            "group": paths.dirname(s.short_path),
             "optional": True,
         } for s in target_info.srcs.to_list()]
         compiled_non_arc_sources = [{
             "path": paths.join(src_dot_dots, s.short_path),
-            "group": paths.dirname(s.short_path),
             "optional": True,
             "compilerFlags": "-fno-objc-arc",
         } for s in target_info.non_arc_srcs.to_list()]
@@ -484,23 +503,16 @@ Double check your rule declaration for naming or add `xcodeproj-ignore-as-target
             "CLANG_ENABLE_OBJC_ARC": "YES",
         }
 
-        # Just like framework, we need to have absolute path to the hmap files
-        # so that Objc files can correctly import headers
-        target_settings["HEADER_SEARCH_PATHS"] = _joined_header_search_paths(
-            target_info.hmap_paths.to_list(),
-        )
-
-        # Ensure Xcode will resolve references to the XCTest framework.
-        framework_search_paths = ["$(PLATFORM_DIR)/Developer/Library/Frameworks"]
-        for fi in target_info.framework_includes.to_list():
-            if fi[0] != "/":
-                fi = "$BAZEL_WORKSPACE_ROOT/%s" % fi
-            framework_search_paths.append("\"%s\"" % fi)
-        target_settings["FRAMEWORK_SEARCH_PATHS"] = " ".join(framework_search_paths)
+        target_settings["BAZEL_SWIFTMODULEFILES_TO_COPY"] = _swiftmodulepaths_for_target(target_name, all_transitive_targets)
+        target_settings["HEADER_SEARCH_PATHS"] = _header_search_paths_for_target(target_name, all_transitive_targets)
+        target_settings["FRAMEWORK_SEARCH_PATHS"] = _framework_search_paths_for_target(target_name, all_transitive_targets)
 
         macros = ["\"%s\"" % d for d in target_info.cc_defines.to_list()]
         macros.append("$(inherited)")
         target_settings["GCC_PREPROCESSOR_DEFINITIONS"] = " ".join(macros)
+
+        if target_info.swift_objc_header_path:
+            target_settings["SWIFT_OBJC_INTERFACE_HEADER_NAME"] = paths.basename(target_info.swift_objc_header_path)
 
         defines_without_equal_sign = ["$(inherited)"]
         for d in target_info.swift_defines.to_list():
@@ -514,11 +526,11 @@ Double check your rule declaration for naming or add `xcodeproj-ignore-as-target
             ["-D%s" % d for d in target_info.cc_defines.to_list()],
         )
 
-        if target_info.product_type == "application":
+        if product_type == "application":
             target_settings["INFOPLIST_FILE"] = "$BAZEL_STUBS_DIR/Info-stub.plist"
             target_settings["PRODUCT_BUNDLE_IDENTIFIER"] = target_info.bundle_id
 
-        if target_info.product_type == "bundle.unit-test":
+        if product_type == "bundle.unit-test":
             target_settings["SUPPORTS_MACCATALYST"] = False
         target_dependencies = []
         test_host_appname = getattr(target_info, "test_host_appname", None)
@@ -530,32 +542,25 @@ Double check your rule declaration for naming or add `xcodeproj-ignore-as-target
 
         xcodeproj_targets_by_name[target_name] = {
             "sources": compiled_sources + compiled_non_arc_sources + asset_sources,
-            "type": target_info.product_type,
+            "type": product_type,
             "platform": _PLATFORM_MAPPING[target_info.platform_type],
             "deploymentTarget": target_info.minimum_os_version,
             "settings": target_settings,
             "dependencies": target_dependencies,
             "preBuildScripts": [{
                 "name": "Build with bazel",
-                "script": """
-set -euxo pipefail
-cd $BAZEL_WORKSPACE_ROOT
-
-export BAZEL_DIAGNOSTICS_DIR="$BUILD_DIR/../../bazel-xcode-diagnostics/"
-mkdir -p $BAZEL_DIAGNOSTICS_DIR
-export DATE_SUFFIX="$(date +%Y%m%d.%H%M%S%L)"
-export BAZEL_BUILD_EVENT_TEXT_FILENAME="$BAZEL_DIAGNOSTICS_DIR/build-event-$DATE_SUFFIX.txt"
-export BAZEL_BUILD_EXECUTION_LOG_FILENAME="$BAZEL_DIAGNOSTICS_DIR/build-execution-log-$DATE_SUFFIX.log"
-env -u RUBYOPT -u RUBY_HOME -u GEM_HOME $BAZEL_BUILD_EXEC {bazel_build_target_name}
-$BAZEL_INSTALLER
-""".format(bazel_build_target_name = target_info.bazel_build_target_name),
+                "script": _BUILD_WITH_BAZEL_SCRIPT.format(bazel_build_target_name = target_info.bazel_build_target_name),
             }],
         }
 
+        # Skip a scheme generation if allowlist is not empty
+        # and current product type not in the list
+        allow_scheme_list = ctx.attr.generate_schemes_for_product_types
+        if len(allow_scheme_list) > 0 and product_type not in allow_scheme_list:
+            continue
+
         scheme_action_details = {"targets": [target_name]}
-
         env_vars_dict = {}
-
         for (k, v) in getattr(target_info, "env_vars", ()):
             # Specific scheme can override the ones defined under env_vars here:
             if ctx.attr.scheme_existing_envvar_overrides.get(k, None):
@@ -586,6 +591,88 @@ $BAZEL_INSTALLER
         # They will show as `TestableReference` under the scheme
         if target_info.product_type == "bundle.unit-test":
             xcodeproj_schemes_by_name[target_name]["test"] = {"targets": [target_name]}
+    return (xcodeproj_targets_by_name, xcodeproj_schemes_by_name)
+
+def _xcodeproj_impl(ctx):
+    xcodegen_jsonfile = ctx.actions.declare_file(
+        "%s-xcodegen.json" % ctx.attr.name,
+    )
+    project_name = (ctx.attr.project_name or ctx.attr.name) + ".xcodeproj"
+    if "/" in project_name:
+        fail("No / allowed in project_name")
+
+    project = ctx.actions.declare_directory(project_name)
+    nesting = ctx.label.package.count("/") + 1 if ctx.label.package else 0
+    src_dot_dots = "/".join([".." for x in range(nesting + 3)])
+    script_dot_dots = "/".join([".." for x in range(nesting)])
+
+    proj_options = {
+        "createIntermediateGroups": True,
+        "defaultConfig": "Debug",
+        "groupSortPosition": "none",
+        "settingPresets": "none",
+    }
+    proj_settings_base = {}
+
+    # User defined macro for Bazel only
+    proj_settings_base.update({
+        "BAZEL_BUILD_EXEC": "$BAZEL_STUBS_DIR/build-wrapper",
+        "BAZEL_OUTPUT_PROCESSOR": "$BAZEL_STUBS_DIR/output-processor.rb",
+        "BAZEL_PATH": ctx.attr.bazel_path,
+        "BAZEL_RULES_IOS_OPTIONS": "--@build_bazel_rules_ios//rules:local_debug_options_enabled",
+        "BAZEL_WORKSPACE_ROOT": "$SRCROOT/%s" % script_dot_dots,
+        "BAZEL_STUBS_DIR": "$PROJECT_FILE_PATH/bazelstubs",
+        "BAZEL_INSTALLERS_DIR": "$PROJECT_FILE_PATH/bazelinstallers",
+        "BAZEL_INSTALLER": "$BAZEL_INSTALLERS_DIR/%s" % ctx.executable.installer.basename,
+        "BAZEL_EXECUTION_LOG_ENABLED": False,
+    })
+
+    # Stubbding main executable used by xcode so no actual building happening on Xcode side
+    proj_settings_base.update({
+        "CC": "$BAZEL_STUBS_DIR/clang-stub",
+        "CXX": "$CC",
+        "CLANG_ANALYZER_EXEC": "$CC",
+        "LD": "$BAZEL_STUBS_DIR/ld-stub",
+        "LIBTOOL": "/usr/bin/true",
+        "SWIFT_EXEC": "$BAZEL_STUBS_DIR/swiftc-stub",
+    })
+
+    # Change of settings to help params used for compiling individual files to match closer to Bazel
+    proj_settings_base.update({
+        "USE_HEADERMAP": False,
+    })
+
+    # Other misc. settings changes
+    proj_settings_base.update({
+        "CODE_SIGNING_ALLOWED": False,
+        "DEBUG_INFORMATION_FORMAT": "dwarf",
+        "DONT_RUN_SWIFT_STDLIB_TOOL": True,
+        "SWIFT_OBJC_INTERFACE_HEADER_NAME": "",
+        "SWIFT_VERSION": 5,
+    })
+
+    # For debugging config only:
+    proj_settings_debug = {
+        "GCC_PREPROCESSOR_DEFINITIONS": "DEBUG",
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
+    }
+    proj_settings = {
+        "base": proj_settings_base,
+        "configs": {
+            "Debug": proj_settings_debug,
+        },
+    }
+
+    targets = []
+    all_transitive_targets = depset(transitive = _get_attr_values_for_name(ctx.attr.deps, _TargetInfo, "targets")).to_list()
+    if ctx.attr.include_transitive_targets:
+        targets = all_transitive_targets
+    else:
+        targets = []
+        for t in _get_attr_values_for_name(ctx.attr.deps, _TargetInfo, "direct_targets"):
+            targets.extend(t)
+
+    (xcodeproj_targets_by_name, xcodeproj_schemes_by_name) = _populate_xcodeproj_targets_and_schemes(ctx, targets, src_dot_dots, all_transitive_targets)
 
     project_file_groups = [
         {"path": paths.join(src_dot_dots, f.short_path), "optional": True}
@@ -613,6 +700,20 @@ $BAZEL_INSTALLER
         "%s-install-xcodeproj.sh" % ctx.attr.name,
     )
     installer_runfile_paths = [i.short_path for i in ctx.attr.installer[DefaultInfo].default_runfiles.files.to_list()]
+
+    # In order to be runnable, the print_json_leaf_nodes script needs to live
+    # next to a print_json_leaf_nodes.runfiles directory that contains its runfiles.
+    # The print_json_leaf_nodes_runfiles array will be populated with the subdirectories
+    # and paths that the py_binary expects the runfiles directory to contain.
+    print_json_leaf_nodes_runfiles = []
+    for pi in ctx.attr.print_json_leaf_nodes[DefaultInfo].default_runfiles.files.to_list():
+        if pi.short_path.startswith("../"):
+            runfiles_subdirectory_path = pi.short_path[3:]
+            print_json_leaf_nodes_runfiles.append(runfiles_subdirectory_path)
+        else:
+            runfiles_subdirectory_path = "%s/%s" % (ctx.workspace_name, pi.short_path)
+            print_json_leaf_nodes_runfiles.append(runfiles_subdirectory_path)
+
     ctx.actions.expand_template(
         template = ctx.file._xcodeproj_installer_template,
         output = install_script,
@@ -626,6 +727,7 @@ $BAZEL_INSTALLER
             "$(clang_stub_ld_path)": ctx.executable.ld_stub.short_path,
             "$(clang_stub_swiftc_path)": ctx.executable.swiftc_stub.short_path,
             "$(print_json_leaf_nodes_path)": ctx.executable.print_json_leaf_nodes.short_path,
+            "$(print_json_leaf_nodes_runfiles)": " ".join(print_json_leaf_nodes_runfiles),
             "$(build_wrapper_path)": ctx.executable.build_wrapper.short_path,
             "$(infoplist_stub)": ctx.file._infoplist_stub.short_path,
             "$(output_processor_path)": ctx.file.output_processor.short_path,
@@ -651,7 +753,10 @@ $BAZEL_INSTALLER
                          ctx.files._workspace_xcsettings +
                          ctx.files._workspace_checks +
                          ctx.files.output_processor,
-                transitive = [ctx.attr.installer[DefaultInfo].default_runfiles.files],
+                transitive = [
+                    ctx.attr.installer[DefaultInfo].default_runfiles.files,
+                    ctx.attr.print_json_leaf_nodes[DefaultInfo].default_runfiles.files,
+                ],
             )),
         ),
     ]
@@ -659,17 +764,22 @@ $BAZEL_INSTALLER
 xcodeproj = rule(
     implementation = _xcodeproj_impl,
     doc = """\
-Generates a Xcode project file (.xcodeproj) with a reasonable set of defaults
+Generates a Xcode project file (.xcodeproj) with a reasonable set of defaults. Specify the --@build_bazel_rules_ios//rules:local_debug_options_enabled when generating the project to ensure debugging of swiftmodules works.
 Tags for configuration:
     xcodeproj-ignore-as-target: Add this to a rule declaration so that this rule will not generates a scheme for this target
 """,
-    cfg = transition_support.force_swift_local_debug_options_transition,
     attrs = {
         "deps": attr.label_list(mandatory = True, allow_empty = False, providers = [], aspects = [_xcodeproj_aspect]),
         "include_transitive_targets": attr.bool(default = False, mandatory = False),
         "project_name": attr.string(mandatory = False),
         "bazel_path": attr.string(mandatory = False, default = "bazel"),
         "scheme_existing_envvar_overrides": attr.string_dict(allow_empty = True, default = {}, mandatory = False),
+        "generate_schemes_for_product_types": attr.string_list(mandatory = False, allow_empty = True, default = [], doc = """\
+Generate schemes only for the specified product types if this list is not empty.
+Product types must be valid apple product types, e.g. application, bundle.unit-test, framework.
+For a full list, see under keys of `PRODUCT_TYPE_UTI` under
+https://www.rubydoc.info/github/CocoaPods/Xcodeproj/Xcodeproj/Constants
+"""),
         "_xcodeproj_installer_template": attr.label(executable = False, default = Label("//tools/xcodeproj_shims:xcodeproj-installer.sh"), allow_single_file = ["sh"]),
         "_infoplist_stub": attr.label(executable = False, default = Label("//rules/test_host_app:Info.plist"), allow_single_file = ["plist"]),
         "_workspace_xcsettings": attr.label(executable = False, default = Label("//tools/xcodeproj_shims:WorkspaceSettings.xcsettings"), allow_single_file = ["xcsettings"]),
@@ -684,10 +794,6 @@ Tags for configuration:
         "installer": attr.label(executable = True, default = Label("//tools/xcodeproj_shims:installer"), cfg = "host"),
         "build_wrapper": attr.label(executable = True, default = Label("//tools/xcodeproj_shims:build-wrapper"), cfg = "host"),
         "additional_files": attr.label_list(allow_files = True, allow_empty = True, default = [], mandatory = False),
-        "_allowlist_function_transition": attr.label(
-            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
-            doc = "Needed to allow this rule to have an incoming edge configuration transition.",
-        ),
     },
     executable = True,
 )

@@ -14,10 +14,10 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "E2BD7425648456079213996C"
-               BuildableName = "TestImports-Unit-Tests.xctest"
-               BlueprintName = "TestImports-Unit-Tests"
-               ReferencedContainer = "container:Test-Imports-App-Project.xcodeproj">
+               BlueprintIdentifier = "19CFCE12EE4A1C14C5132B34"
+               BuildableName = "App.app"
+               BlueprintName = "App"
+               ReferencedContainer = "container:Test-MultipleConfigs-Project-WithTransitiveFlag.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -29,28 +29,16 @@
       onlyGenerateCoverageForSpecifiedTargets = "NO"
       shouldUseLaunchSchemeArgsEnv = "YES">
       <Testables>
-         <TestableReference
-            skipped = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "E2BD7425648456079213996C"
-               BuildableName = "TestImports-Unit-Tests.xctest"
-               BlueprintName = "TestImports-Unit-Tests"
-               ReferencedContainer = "container:Test-Imports-App-Project.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E2BD7425648456079213996C"
-            BuildableName = "TestImports-Unit-Tests.xctest"
-            BlueprintName = "TestImports-Unit-Tests"
-            ReferencedContainer = "container:Test-Imports-App-Project.xcodeproj">
+            BlueprintIdentifier = "19CFCE12EE4A1C14C5132B34"
+            BuildableName = "App.app"
+            BlueprintName = "App"
+            ReferencedContainer = "container:Test-MultipleConfigs-Project-WithTransitiveFlag.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
-      <CommandLineArguments>
-      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
@@ -62,15 +50,16 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES">
-      <MacroExpansion>
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E2BD7425648456079213996C"
-            BuildableName = "TestImports-Unit-Tests.xctest"
-            BlueprintName = "TestImports-Unit-Tests"
-            ReferencedContainer = "container:Test-Imports-App-Project.xcodeproj">
+            BlueprintIdentifier = "19CFCE12EE4A1C14C5132B34"
+            BuildableName = "App.app"
+            BlueprintName = "App"
+            ReferencedContainer = "container:Test-MultipleConfigs-Project-WithTransitiveFlag.xcodeproj">
          </BuildableReference>
-      </MacroExpansion>
+      </BuildableProductRunnable>
       <CommandLineArguments>
       </CommandLineArguments>
    </LaunchAction>
@@ -84,10 +73,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E2BD7425648456079213996C"
-            BuildableName = "TestImports-Unit-Tests.xctest"
-            BlueprintName = "TestImports-Unit-Tests"
-            ReferencedContainer = "container:Test-Imports-App-Project.xcodeproj">
+            BlueprintIdentifier = "19CFCE12EE4A1C14C5132B34"
+            BuildableName = "App.app"
+            BlueprintName = "App"
+            ReferencedContainer = "container:Test-MultipleConfigs-Project-WithTransitiveFlag.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

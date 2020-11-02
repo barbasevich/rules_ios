@@ -19,6 +19,15 @@ mkdir -p "${stubs_dir}"
 readonly installers_dir="${tmp_dest}/bazelinstallers"
 mkdir -p "${installers_dir}"
 
+readonly print_json_installers_dir="${stubs_dir}/print_json_leaf_nodes.runfiles/"
+mkdir -p "${print_json_installers_dir}"
+
+for PRINT_INSTALLER_PATH in $(print_json_leaf_nodes_runfiles)
+do
+  mkdir -p "${print_json_installers_dir}/$(dirname $PRINT_INSTALLER_PATH)"
+  cp "${PWD}/../$PRINT_INSTALLER_PATH" "${print_json_installers_dir}/$PRINT_INSTALLER_PATH"
+done
+
 for INSTALLER_PATH in $(installer_runfile_short_paths)
 do
   cp "$INSTALLER_PATH" "${installers_dir}/"
@@ -43,7 +52,10 @@ cp "$(ideworkspacechecks_plist_short_path)" "$tmp_dest/project.xcworkspace/xcsha
 
 chmod -R +w "${tmp_dest}"
 
+# if installing into the root of the workspace, remove the path entry entirely
+sed -i.bak -E -e 's|^([[:space:]]*path = )../../..;$|\1.;|g' "${tmp_dest}/project.pbxproj"
 # always trim three ../ from path, since that's "bazel-out/darwin-fastbuild/bin"
 sed -i.bak -E -e 's|([ "])../../../|\1|g' "${tmp_dest}/project.pbxproj"
 rm "${tmp_dest}/project.pbxproj.bak"
+
 rsync --recursive --quiet --copy-links "${tmp_dest}" "${dest}"
